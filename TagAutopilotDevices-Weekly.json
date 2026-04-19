@@ -241,7 +241,7 @@
                             ]
                         },
                         "type": "Compose",
-                        "inputs": "@concat(if(empty(body('Parse_User_Department')?['department']), 'Default', body('Parse_User_Department')?['department']), if(contains(body('Parse_Group_Membership')?['value'], 'c312c9c8-2815-4126-aadf-ffeaaf608618'), '|HEP', ''), if(contains(body('Parse_Group_Membership')?['value'], 'a4d0efd9-560d-4eaa-b041-9c2ff4b992e6'), '|GER', ''))"
+                        "inputs": "@concat(if(empty(body('Parse_User_Department')?['department']), 'Default', body('Parse_User_Department')?['department']), if(contains(body('Parse_Group_Membership')?['value'], 'XXX'), '|HEP', ''), if(contains(body('Parse_Group_Membership')?['value'], 'XXX'), '|GER', ''))"
                     },
                     "Update_Device_GroupTag": {
                         "runAfter": {
