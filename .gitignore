@@ -1,0 +1,15 @@
+# Local secrets and environment
+.env
+.env.*
+
+# Optional: commit a template as .env.example and uncomment the next line
+# !.env.example
+
+# Local overrides for parameters / exports (never commit real secrets)
+*.local.json
+*.parameters.local.json
+*.secrets.json
+
+# OS
+.DS_Store
+Thumbs.db
