@@ -1,0 +1,247 @@
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "triggers": {
+            "Recurrence": {
+                "recurrence": {
+                    "frequency": "Day",
+                    "interval": 1
+                },
+                "evaluatedRecurrence": {
+                    "frequency": "Day",
+                    "interval": 1
+                },
+                "type": "Recurrence"
+            }
+        },
+        "actions": {
+            "Get_Access_Token": {
+                "runAfter": {},
+                "type": "Http",
+                "inputs": {
+                    "uri": "https://login.microsoftonline.com/@{parameters('tenantId')}/oauth2/v2.0/token",
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/x-www-form-urlencoded"
+                    },
+                    "body": "client_id=@{parameters('clientId')}&scope=https://graph.microsoft.com/.default&client_secret=@{parameters('clientSecret')}&grant_type=client_credentials"
+                }
+            },
+            "Parse_Token": {
+                "runAfter": {
+                    "Get_Access_Token": [
+                        "Succeeded"
+                    ]
+                },
+                "type": "ParseJson",
+                "inputs": {
+                    "content": "@body('Get_Access_Token')",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "access_token": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "Initialize_NextLink": {
+                "runAfter": {
+                    "Parse_Token": [
+                        "Succeeded"
+                    ]
+                },
+                "type": "InitializeVariable",
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "nextLink",
+                            "type": "string",
+                            "value": "https://graph.microsoft.com/beta/deviceManagement/windowsAutopilotDeviceIdentities?$top=999"
+                        }
+                    ]
+                }
+            },
+            "Until_No_NextLink": {
+                "actions": {
+                    "Get_Devices": {
+                        "type": "Http",
+                        "inputs": {
+                            "uri": "@variables('nextLink')",
+                            "method": "GET",
+                            "headers": {
+                                "Authorization": "Bearer @{body('Parse_Token')?['access_token']}"
+                            }
+                        }
+                    },
+                    "Parse_Devices": {
+                        "runAfter": {
+                            "Get_Devices": [
+                                "Succeeded"
+                            ]
+                        },
+                        "type": "ParseJson",
+                        "inputs": {
+                            "content": "@body('Get_Devices')",
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "value": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {
+                                                    "type": "string"
+                                                },
+                                                "userPrincipalName": {
+                                                    "type": [
+                                                        "string",
+                                                        "null"
+                                                    ]
+                                                },
+                                                "displayName": {
+                                                    "type": [
+                                                        "string",
+                                                        "null"
+                                                    ]
+                                                },
+                                                "model": {
+                                                    "type": [
+                                                        "string",
+                                                        "null"
+                                                    ]
+                                                },
+                                                "manufacturer": {
+                                                    "type": [
+                                                        "string",
+                                                        "null"
+                                                    ]
+                                                },
+                                                "serialNumber": {
+                                                    "type": [
+                                                        "string",
+                                                        "null"
+                                                    ]
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "@@odata.nextLink": {
+                                        "type": [
+                                            "string",
+                                            "null"
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "For_Each_Device": {
+                        "foreach": "@body('Parse_Devices')?['value']",
+                        "actions": {
+                            "Condition_Check": {
+                                "actions": {
+                                    "Update_Device_Name": {
+                                        "type": "Http",
+                                        "inputs": {
+                                            "uri": "https://graph.microsoft.com/beta/deviceManagement/windowsAutopilotDeviceIdentities/@{item()?['id']}/updateDeviceProperties",
+                                            "method": "POST",
+                                            "headers": {
+                                                "Authorization": "Bearer @{body('Parse_Token')?['access_token']}",
+                                                "Content-Type": "application/json"
+                                            },
+                                            "body": {
+                                                "displayName": "@{first(split(item()?['userPrincipalName'],'@'))}-AP@{trim(substring(concat(item()?['manufacturer'], '    '), 0, 4))}"
+                                            }
+                                        }
+                                    }
+                                },
+                                "else": {
+                                    "actions": {}
+                                },
+                                "expression": {
+                                    "and": [
+                                        {
+                                            "not": {
+                                                "equals": [
+                                                    "@empty(item()?['userPrincipalName'])",
+                                                    true
+                                                ]
+                                            }
+                                        },
+                                        {
+                                            "equals": [
+                                                "@empty(item()?['displayName'])",
+                                                true
+                                            ]
+                                        }
+                                    ]
+                                },
+                                "type": "If"
+                            }
+                        },
+                        "runAfter": {
+                            "Parse_Devices": [
+                                "Succeeded"
+                            ]
+                        },
+                        "type": "Foreach"
+                    },
+                    "Set_NextLink": {
+                        "runAfter": {
+                            "For_Each_Device": [
+                                "Succeeded",
+                                "Failed"
+                            ]
+                        },
+                        "type": "SetVariable",
+                        "inputs": {
+                            "name": "nextLink",
+                            "value": "@coalesce(body('Parse_Devices')?['@odata.nextLink'], '')"
+                        }
+                    }
+                },
+                "runAfter": {
+                    "Initialize_NextLink": [
+                        "Succeeded"
+                    ]
+                },
+                "expression": "@equals(variables('nextLink'), '')",
+                "limit": {
+                    "count": 10,
+                    "timeout": "PT1H"
+                },
+                "type": "Until"
+            }
+        },
+        "outputs": {},
+        "parameters": {
+            "tenantId": {
+                "defaultValue": "XXX",
+                "type": "String"
+            },
+            "clientId": {
+                "defaultValue": "XXX",
+                "type": "String"
+            },
+            "clientSecret": {
+                "defaultValue": "XXX",
+                "type": "SecureString"
+            },
+            "$connections": {
+                "type": "Object",
+                "defaultValue": {}
+            }
+        }
+    },
+    "parameters": {
+        "clientSecret": {},
+        "$connections": {
+            "type": "Object",
+            "value": {}
+        }
+    }
+}

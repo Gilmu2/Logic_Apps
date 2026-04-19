@@ -1,0 +1,287 @@
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowDefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "triggers": {
+            "Recurrence": {
+                "recurrence": {
+                    "frequency": "Week",
+                    "interval": 1
+                },
+                "evaluatedRecurrence": {
+                    "frequency": "Week",
+                    "interval": 1
+                },
+                "type": "Recurrence"
+            }
+        },
+        "actions": {
+            "Get_Access_Token": {
+                "runAfter": {},
+                "type": "Http",
+                "inputs": {
+                    "uri": "https://login.microsoftonline.com/XXX/oauth2/v2.0/token",
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/x-www-form-urlencoded"
+                    },
+                    "body": "client_id=XXX&scope=https://graph.microsoft.com/.default&client_secret=XXX&grant_type=client_credentials"
+                }
+            },
+            "Parse_Token": {
+                "runAfter": {
+                    "Get_Access_Token": [
+                        "Succeeded"
+                    ]
+                },
+                "type": "ParseJson",
+                "inputs": {
+                    "content": "@body('Get_Access_Token')",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "access_token": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "Initialize_NextLink": {
+                "runAfter": {
+                    "Parse_Token": [
+                        "Succeeded"
+                    ]
+                },
+                "type": "InitializeVariable",
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "NextLink",
+                            "type": "string",
+                            "value": "https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities"
+                        }
+                    ]
+                }
+            },
+            "Initialize_AllDevices": {
+                "runAfter": {
+                    "Initialize_NextLink": [
+                        "Succeeded"
+                    ]
+                },
+                "type": "InitializeVariable",
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "AllDevices",
+                            "type": "array",
+                            "value": []
+                        }
+                    ]
+                }
+            },
+            "Until_No_More_Pages": {
+                "actions": {
+                    "Get_Autopilot_Devices_Page": {
+                        "type": "Http",
+                        "inputs": {
+                            "uri": "@variables('NextLink')",
+                            "method": "GET",
+                            "headers": {
+                                "Authorization": "Bearer @{body('Parse_Token')['access_token']}"
+                            }
+                        }
+                    },
+                    "Parse_Devices_Response": {
+                        "runAfter": {
+                            "Get_Autopilot_Devices_Page": [
+                                "Succeeded"
+                            ]
+                        },
+                        "type": "ParseJson",
+                        "inputs": {
+                            "content": "@body('Get_Autopilot_Devices_Page')",
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "value": {
+                                        "type": "array"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "For_each_device_in_page": {
+                        "foreach": "@body('Parse_Devices_Response')?['value']",
+                        "actions": {
+                            "Append_Device_to_Array": {
+                                "type": "AppendToArrayVariable",
+                                "inputs": {
+                                    "name": "AllDevices",
+                                    "value": "@items('For_each_device_in_page')"
+                                }
+                            }
+                        },
+                        "runAfter": {
+                            "Parse_Devices_Response": [
+                                "Succeeded"
+                            ]
+                        },
+                        "type": "Foreach"
+                    },
+                    "Set_NextLink": {
+                        "runAfter": {
+                            "For_each_device_in_page": [
+                                "Succeeded"
+                            ]
+                        },
+                        "type": "SetVariable",
+                        "inputs": {
+                            "name": "NextLink",
+                            "value": "@{if(contains(body('Get_Autopilot_Devices_Page'), '@odata.nextLink'), body('Get_Autopilot_Devices_Page')['@odata.nextLink'], '')}"
+                        }
+                    }
+                },
+                "runAfter": {
+                    "Initialize_AllDevices": [
+                        "Succeeded"
+                    ]
+                },
+                "expression": "@equals(variables('NextLink'), '')",
+                "limit": {
+                    "count": 60,
+                    "timeout": "PT1H"
+                },
+                "type": "Until"
+            },
+            "For_each_device": {
+                "foreach": "@variables('AllDevices')",
+                "actions": {
+                    "Get_User_Department": {
+                        "type": "Http",
+                        "inputs": {
+                            "uri": "https://graph.microsoft.com/v1.0/users/@{items('For_each_device')?['userPrincipalName']}?$select=department",
+                            "method": "GET",
+                            "headers": {
+                                "Authorization": "Bearer @{body('Parse_Token')['access_token']}"
+                            }
+                        }
+                    },
+                    "Parse_User_Department": {
+                        "runAfter": {
+                            "Get_User_Department": [
+                                "Succeeded"
+                            ]
+                        },
+                        "type": "ParseJson",
+                        "inputs": {
+                            "content": "@body('Get_User_Department')",
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "department": {
+                                        "type": [
+                                            "string",
+                                            "null"
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "Check_Group_Membership": {
+                        "runAfter": {
+                            "Parse_User_Department": [
+                                "Succeeded"
+                            ]
+                        },
+                        "type": "Http",
+                        "inputs": {
+                            "uri": "https://graph.microsoft.com/v1.0/users/@{items('For_each_device')?['userPrincipalName']}/checkMemberObjects",
+                            "method": "POST",
+                            "headers": {
+                                "Authorization": "Bearer @{body('Parse_Token')['access_token']}",
+                                "Content-Type": "application/json"
+                            },
+                            "body": {
+                                "ids": [
+                                    "XXX",
+                                    "XXX"
+                                ]
+                            }
+                        }
+                    },
+                    "Parse_Group_Membership": {
+                        "runAfter": {
+                            "Check_Group_Membership": [
+                                "Succeeded"
+                            ]
+                        },
+                        "type": "ParseJson",
+                        "inputs": {
+                            "content": "@body('Check_Group_Membership')",
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "value": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "Compose_GroupTag": {
+                        "runAfter": {
+                            "Parse_Group_Membership": [
+                                "Succeeded"
+                            ]
+                        },
+                        "type": "Compose",
+                        "inputs": "@concat(if(empty(body('Parse_User_Department')?['department']), 'Default', body('Parse_User_Department')?['department']), if(contains(body('Parse_Group_Membership')?['value'], 'c312c9c8-2815-4126-aadf-ffeaaf608618'), '|HEP', ''), if(contains(body('Parse_Group_Membership')?['value'], 'a4d0efd9-560d-4eaa-b041-9c2ff4b992e6'), '|GER', ''))"
+                    },
+                    "Update_Device_GroupTag": {
+                        "runAfter": {
+                            "Compose_GroupTag": [
+                                "Succeeded"
+                            ]
+                        },
+                        "type": "Http",
+                        "inputs": {
+                            "uri": "https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities/@{items('For_each_device')?['id']}/updateDeviceProperties",
+                            "method": "POST",
+                            "headers": {
+                                "Authorization": "Bearer @{body('Parse_Token')['access_token']}",
+                                "Content-Type": "application/json"
+                            },
+                            "body": {
+                                "groupTag": "@{outputs('Compose_GroupTag')}"
+                            }
+                        }
+                    }
+                },
+                "runAfter": {
+                    "Until_No_More_Pages": [
+                        "Succeeded"
+                    ]
+                },
+                "type": "Foreach"
+            }
+        },
+        "parameters": {
+            "$connections": {
+                "type": "Object",
+                "defaultValue": {}
+            }
+        }
+    },
+    "parameters": {
+        "$connections": {
+            "type": "Object",
+            "value": {}
+        }
+    }
+}
