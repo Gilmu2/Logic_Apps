@@ -1,0 +1,383 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+      "tenantId": {
+        "type": "string"
+      },
+      "clientId": {
+        "type": "string"
+      },
+      "clientSecret": {
+        "type": "securestring"
+      }
+    },
+    "triggers": {
+      "Recurrence": {
+        "type": "Recurrence",
+        "recurrence": {
+          "frequency": "Day",
+          "interval": 1,
+          "startTime": "2024-01-01T02:00:00Z",
+          "timeZone": "UTC"
+        }
+      }
+    },
+    "actions": {
+
+      "Get_OAuth_Token": {
+        "type": "Http",
+        "runAfter": {},
+        "inputs": {
+          "method": "POST",
+          "uri": "https://login.microsoftonline.com/@{parameters('tenantId')}/oauth2/v2.0/token",
+          "headers": {
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          "body": "grant_type=client_credentials&client_id=@{parameters('clientId')}&client_secret=@{encodeUriComponent(parameters('clientSecret'))}&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default"
+        }
+      },
+
+      "Parse_Token_Response": {
+        "type": "ParseJson",
+        "runAfter": {
+          "Get_OAuth_Token": ["Succeeded"]
+        },
+        "inputs": {
+          "content": "@body('Get_OAuth_Token')",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "access_token": { "type": "string" },
+              "token_type":   { "type": "string" },
+              "expires_in":   { "type": "integer" }
+            }
+          }
+        }
+      },
+
+      "Permission_Notice": {
+        "type": "Compose",
+        "runAfter": {
+          "Parse_Token_Response": ["Succeeded"]
+        },
+        "inputs": {
+          "authentication": "Client credentials: workflow parameters tenantId, clientId, clientSecret (securestring) supply your app registration. Token uses scope https://graph.microsoft.com/.default.",
+          "secretHandling": "Prefer setting clientSecret in Logic app Parameters (secure) or an ARM Key Vault reference; avoid hardcoding in the definition JSON committed to git.",
+          "graphApplicationPermissionsOnAppReg": [
+            "DeviceManagementServiceConfig.ReadWrite.All",
+            "DeviceManagementManagedDevices.Read.All",
+            "User.Read.All"
+          ],
+          "autopilotListQuery": "Do not use $select on windowsAutopilotDeviceIdentities; Intune may return HTTP 500. Paginate with $top=100."
+        }
+      },
+
+      "Initialize_NextLink": {
+        "type": "InitializeVariable",
+        "runAfter": {
+          "Permission_Notice": ["Succeeded"]
+        },
+        "inputs": {
+          "variables": [
+            {
+              "name": "nextLink",
+              "type": "string",
+              "value": "https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities?$top=100"
+            }
+          ]
+        }
+      },
+
+      "Initialize_DeviceCount": {
+        "type": "InitializeVariable",
+        "runAfter": {
+          "Initialize_NextLink": ["Succeeded"]
+        },
+        "inputs": {
+          "variables": [
+            {
+              "name": "deviceCount",
+              "type": "integer",
+              "value": 0
+            }
+          ]
+        }
+      },
+
+      "Paginate_And_Process": {
+        "type": "Until",
+        "runAfter": {
+          "Initialize_DeviceCount": ["Succeeded"]
+        },
+        "expression": "@empty(variables('nextLink'))",
+        "limit": {
+          "count": 200,
+          "timeout": "PT8H"
+        },
+        "actions": {
+
+          "Get_Autopilot_Page": {
+            "type": "Http",
+            "runAfter": {},
+            "inputs": {
+              "method": "GET",
+              "uri": "@variables('nextLink')",
+              "headers": {
+                "Authorization": "Bearer @{body('Parse_Token_Response')?['access_token']}",
+                "Content-Type": "application/json"
+              },
+              "retryPolicy": {
+                "type": "fixed",
+                "count": 4,
+                "interval": "PT30S"
+              }
+            }
+          },
+
+          "Parse_Autopilot_Page": {
+            "type": "ParseJson",
+            "runAfter": {
+              "Get_Autopilot_Page": ["Succeeded"]
+            },
+            "inputs": {
+              "content": "@body('Get_Autopilot_Page')",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id":                  { "type": "string" },
+                        "serialNumber":        { "type": "string" },
+                        "managedDeviceId":     { "type": "string" },
+                        "userPrincipalName":   { "type": "string" },
+                        "addressableUserName": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+
+          "Increment_DeviceCount": {
+            "type": "IncrementVariable",
+            "runAfter": {
+              "Parse_Autopilot_Page": ["Succeeded"]
+            },
+            "inputs": {
+              "name": "deviceCount",
+              "value": "@length(body('Parse_Autopilot_Page')?['value'])"
+            }
+          },
+
+          "Filter_Unassigned_On_Page": {
+            "type": "Query",
+            "runAfter": {
+              "Increment_DeviceCount": ["Succeeded"]
+            },
+            "inputs": {
+              "from": "@body('Parse_Autopilot_Page')?['value']",
+              "where": "@and(empty(item()?['userPrincipalName']), not(empty(item()?['managedDeviceId'])), not(equals(toLower(trim(string(item()?['managedDeviceId']))), '00000000-0000-0000-0000-000000000000')))"
+            }
+          },
+
+          "For_Each_Unassigned_Device": {
+            "type": "Foreach",
+            "runAfter": {
+              "Filter_Unassigned_On_Page": ["Succeeded"]
+            },
+            "foreach": "@body('Filter_Unassigned_On_Page')",
+            "runtimeConfiguration": {
+              "concurrency": { "repetitions": 5 }
+            },
+            "actions": {
+
+              "Process_Autopilot_Device": {
+                "type": "Scope",
+                "runAfter": {},
+                "actions": {
+                  "Get_Primary_User": {
+                    "type": "Http",
+                    "runAfter": {},
+                    "inputs": {
+                      "method": "GET",
+                      "uri": "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices('@{items('For_Each_Unassigned_Device')?['managedDeviceId']}')/users",
+                      "headers": {
+                        "Authorization": "Bearer @{body('Parse_Token_Response')?['access_token']}",
+                        "Content-Type": "application/json"
+                      },
+                      "retryPolicy": {
+                        "type": "fixed",
+                        "count": 2,
+                        "interval": "PT10S"
+                      }
+                    }
+                  },
+
+                  "Parse_Primary_User": {
+                    "type": "ParseJson",
+                    "runAfter": {
+                      "Get_Primary_User": ["Succeeded"]
+                    },
+                    "inputs": {
+                      "content": "@body('Get_Primary_User')",
+                      "schema": {
+                        "type": "object",
+                        "properties": {
+                          "value": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "id":                { "type": "string" },
+                                "userPrincipalName": { "type": "string" },
+                                "displayName":       { "type": "string" }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+
+                  "Check_Primary_User_Exists": {
+                    "type": "If",
+                    "runAfter": {
+                      "Parse_Primary_User": ["Succeeded"]
+                    },
+                    "expression": {
+                      "and": [
+                        {
+                          "greater": [
+                            "@length(body('Parse_Primary_User')?['value'])",
+                            0
+                          ]
+                        }
+                      ]
+                    },
+                    "actions": {
+                      "Get_Azure_AD_User_For_DisplayName": {
+                        "type": "Http",
+                        "runAfter": {},
+                        "inputs": {
+                          "method": "GET",
+                          "uri": "@{concat('https://graph.microsoft.com/v1.0/users/', encodeUriComponent(first(body('Parse_Primary_User')?['value'])?['userPrincipalName']), '?$select=displayName,userPrincipalName')}",
+                          "headers": {
+                            "Authorization": "Bearer @{body('Parse_Token_Response')?['access_token']}",
+                            "Content-Type": "application/json"
+                          },
+                          "retryPolicy": {
+                            "type": "fixed",
+                            "count": 3,
+                            "interval": "PT15S"
+                          }
+                        }
+                      },
+                      "Assign_User_To_Autopilot_Device": {
+                        "type": "Http",
+                        "runAfter": {
+                          "Get_Azure_AD_User_For_DisplayName": ["Succeeded", "Failed"]
+                        },
+                        "inputs": {
+                          "method": "POST",
+                          "uri": "https://graph.microsoft.com/v1.0/deviceManagement/windowsAutopilotDeviceIdentities/@{items('For_Each_Unassigned_Device')?['id']}/assignUserToDevice",
+                          "headers": {
+                            "Authorization": "Bearer @{body('Parse_Token_Response')?['access_token']}",
+                            "Content-Type": "application/json"
+                          },
+                          "body": {
+                            "userPrincipalName": "@{first(body('Parse_Primary_User')?['value'])?['userPrincipalName']}",
+                            "addressableUserName": "@{coalesce(body('Get_Azure_AD_User_For_DisplayName')?['displayName'], first(body('Parse_Primary_User')?['value'])?['displayName'])}"
+                          }
+                        }
+                      },
+                      "Log_Assignment_Success": {
+                        "type": "Compose",
+                        "runAfter": {
+                          "Assign_User_To_Autopilot_Device": ["Succeeded"]
+                        },
+                        "inputs": {
+                          "status":          "Assigned",
+                          "autopilotId":     "@items('For_Each_Unassigned_Device')?['id']",
+                          "serialNumber":    "@items('For_Each_Unassigned_Device')?['serialNumber']",
+                          "assignedUserUPN": "@first(body('Parse_Primary_User')?['value'])?['userPrincipalName']",
+                          "timestamp":       "@utcNow()"
+                        }
+                      }
+                    },
+                    "else": {
+                      "actions": {
+                        "Log_No_Primary_User": {
+                          "type": "Compose",
+                          "runAfter": {},
+                          "inputs": {
+                            "status":       "NoPrimaryUser",
+                            "autopilotId":  "@items('For_Each_Unassigned_Device')?['id']",
+                            "serialNumber": "@items('For_Each_Unassigned_Device')?['serialNumber']",
+                            "timestamp":    "@utcNow()"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+
+              "Iterate_Device_Section_Done": {
+                "type": "Compose",
+                "runAfter": {
+                  "Process_Autopilot_Device": ["Succeeded", "Failed"]
+                },
+                "inputs": {
+                  "serialNumber": "@items('For_Each_Unassigned_Device')?['serialNumber']",
+                  "managedDeviceId": "@items('For_Each_Unassigned_Device')?['managedDeviceId']",
+                  "note": "Completes iteration when Process_Autopilot_Device fails (e.g. ResourceNotFound on managed device or no users) so the foreach continues with other devices."
+                }
+              }
+            }
+          },
+
+          "Update_NextLink": {
+            "type": "SetVariable",
+            "runAfter": {
+              "For_Each_Unassigned_Device": ["Succeeded"]
+            },
+            "inputs": {
+              "name": "nextLink",
+              "value": "@{coalesce(body('Get_Autopilot_Page')?['@odata.nextLink'], '')}"
+            }
+          }
+        }
+      },
+
+      "Log_Total_Devices_Processed": {
+        "type": "Compose",
+        "runAfter": {
+          "Paginate_And_Process": ["Succeeded"]
+        },
+        "inputs": {
+          "totalAutopilotDevicesChecked": "@variables('deviceCount')",
+          "timestamp": "@utcNow()"
+        }
+      }
+
+    },
+    "outputs": {}
+  },
+  "parameters": {
+    "tenantId": {
+      "value": "REPLACE_WITH_YOUR_TENANT_ID"
+    },
+    "clientId": {
+      "value": "REPLACE_WITH_YOUR_CLIENT_ID"
+    },
+    "clientSecret": {
+      "value": "REPLACE_WITH_YOUR_CLIENT_SECRET"
+    }
+  }
+}

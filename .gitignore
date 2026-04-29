@@ -10,6 +10,9 @@
 *.parameters.local.json
 *.secrets.json
 
+# Local Azure / tooling (if used alongside workflows)
+local.settings.json
+
 # OS
 .DS_Store
 Thumbs.db
